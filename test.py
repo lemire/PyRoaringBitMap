@@ -12,6 +12,7 @@ import random
 import operator
 import unittest
 import functools
+import base64
 from typing import TYPE_CHECKING
 from collections.abc import Set, Callable, Iterable, Iterator
 
@@ -142,21 +143,37 @@ class Util:
         return [bitmap[i] for i in indices]
 
     def assert_is_not(self, bitmap1: AbstractBitMap, bitmap2: AbstractBitMap) -> None:
+        add1 = remove1 = add2 = remove2 = -1
         if isinstance(bitmap1, BitMap):
             if bitmap1:
-                bitmap1.remove(bitmap1[0])
+                remove1 = bitmap1[0]
+                bitmap1.remove(remove1)
             else:
-                bitmap1.add(27)
+                add1 = 27
+                bitmap1.add(add1)
         elif isinstance(bitmap2, BitMap):
             if bitmap2:
-                bitmap2.remove(bitmap1[0])
+                remove2 = bitmap2[0]
+                bitmap2.remove(remove2)
             else:
-                bitmap2.add(27)
+                add2 = 27
+                bitmap2.add(add2)
         else:  # The two are non-mutable, cannot do anything...
             return
         if bitmap1 == bitmap2:
             pytest.fail(
                 'The two bitmaps are identical (modifying one also modifies the other).')
+        # Restore the bitmaps to their original point
+        else:
+            if add1 >= 0:
+                bitmap1.remove(add1)
+            if remove1 >= 0:
+                bitmap1.add(remove1)
+            if add2 >= 0:
+                bitmap2.remove(add2)
+            if remove2 >= 0:
+                bitmap2.add(remove2)
+
 
 
 class TestBasic(Util):
@@ -873,6 +890,34 @@ class TestSerialization(Util):
         assert isinstance(new_bm, cls2)
         self.assert_is_not(old_bm, new_bm)
 
+    @given(bitmap_cls, bitmap_cls, hyp_many_collections)
+    def test_deserialization_from_memoryview(
+        self,
+        cls1: type[EitherBitMap],
+        cls2: type[EitherBitMap],
+        values: list[HypCollection]
+    ) -> None:
+        old_bms = [cls1(vals) for vals in values]
+
+        # Create a memoryview with all of the items concatenated into a single bytes
+        # object.
+        serialized = [bm.serialize() for bm in old_bms]
+        sizes = [len(ser) for ser in serialized]
+        starts = [0]
+        for s in sizes:
+            starts.append(s + starts[-1])
+
+        combined = b''.join(serialized)
+        mutable_combined = bytearray(combined)
+
+        for source in (combined, mutable_combined):
+            with memoryview(source) as mv:
+                new_bms = [cls2.deserialize(mv[start: start + size])for start, size in zip(starts, sizes)]
+                for old_bm, new_bm in zip(old_bms, new_bms):
+                    assert old_bm == new_bm
+                    assert isinstance(new_bm, cls2)
+                    self.assert_is_not(old_bm, new_bm)
+
     @given(bitmap_cls, hyp_collection, st.integers(min_value=2, max_value=pickle.HIGHEST_PROTOCOL))
     def test_pickle_protocol(
         self,
@@ -885,6 +930,27 @@ class TestSerialization(Util):
         new_bm = pickle.loads(pickled)
         assert old_bm == new_bm
         self.assert_is_not(old_bm, new_bm)
+
+    @given(bitmap_cls)
+    def test_impossible_deserialization(
+        self,
+        cls: type[EitherBitMap],
+    ) -> None:
+        wrong_input = base64.b64decode('aGVsbG8gd29ybGQ=')
+        with pytest.raises(ValueError, match='Could not deserialize bitmap'):
+            bitmap = cls.deserialize(wrong_input)
+
+    @given(bitmap_cls)
+    def test_invalid_deserialization(
+        self,
+        cls: type[EitherBitMap],
+    ) -> None:
+        wrong_input = base64.b64decode('aGVsbG8gd29ybGQ=')
+        bm = cls(list(range(0, 1000000, 3)))
+        bitmap_bytes = bm.serialize()
+        bitmap_bytes = bitmap_bytes[:42] + wrong_input + bitmap_bytes[42:]
+        with pytest.raises(ValueError, match='Invalid bitmap after deserialization|Could not deserialize bitmap'):
+            bitmap = cls.deserialize(bitmap_bytes)
 
 
 class TestStatistics(Util):
@@ -1199,6 +1265,17 @@ class TestFrozen:
         assert bm1.get_statistics() != bm2.get_statistics()
         assert hash(bm1) == hash(bm2)
 
+    def test_hash_eq_after_operations(self) -> None:
+        """Testing that bitmaps have the same hash even when they have been obtained after some operations.
+        Test for issue #129.
+        """
+        ref_hash = hash(FrozenBitMap([2, 3]))
+        assert ref_hash == hash(FrozenBitMap([1, 2, 3]) & FrozenBitMap([2, 3, 4]))
+        assert ref_hash == hash(FrozenBitMap([1, 2, 3]).intersection(FrozenBitMap([2, 3, 4]), FrozenBitMap([0, 2, 3])))
+        assert ref_hash == hash(FrozenBitMap([2]) | FrozenBitMap([3]))
+        assert ref_hash == hash(FrozenBitMap([2]).union(FrozenBitMap([3]), FrozenBitMap()))
+        assert ref_hash == hash(FrozenBitMap([1, 2, 3, 4]) - FrozenBitMap([1, 4]))
+        assert ref_hash == hash(FrozenBitMap([1, 2, 3, 4]).difference(FrozenBitMap([1]), FrozenBitMap([4])))
 
 class TestOptimization:
 

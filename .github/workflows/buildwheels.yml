@@ -8,10 +8,14 @@
 name: Build and upload wheels
 
 on:
+  workflow_dispatch:
   push:
-    tags:
-      - '[0-9]+\.[0-9]+\.[0-9]+'
-      - '[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+'
+    branches:
+      - master
+  release:
+    types:
+      - released
+      - prereleased
 
 jobs:
 
@@ -24,9 +28,10 @@ jobs:
       - name: Build sdist
         run: pipx run build --sdist
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           path: dist/*.tar.gz
+          name: cibw-sdist
 
   build_wheels:
     name: Build wheels on ${{ matrix.os }}
@@ -34,62 +39,53 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-20.04
-            cibw_archs: "native"
-          - os: ubuntu-22.04
-            cibw_archs: "aarch64 armv7l"
-          - os: windows-latest
-            cibw_archs: "native ARM64"
-          - os: macos-latest
-            cibw_archs: "x86_64 universal2 arm64"
+        # macos-13 is an intel runner, macos-14 is apple silicon
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-13, macos-14]
 
     steps:
       - uses: actions/checkout@v3
       - name: Set up QEMU
-        if: matrix.cibw_archs == 'aarch64'
-        uses: docker/setup-qemu-action@v2
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        uses: docker/setup-qemu-action@v3
         with:
-          platforms: arm64
+          platforms: all
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.23.2
         env:
           CIBW_TEST_REQUIRES: hypothesis pytest
-          CIBW_TEST_COMMAND: "py.test {project}/test.py -v && python {project}/cydoctest.py -v"
+          CIBW_TEST_COMMAND: "python {project}/cydoctest.py -v"  # full test command: py.test {project}/test.py -v
           CIBW_SKIP: "pp* cp36-* cp37-*"
-          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_ARCHS_LINUX: ${{ runner.arch == 'X64' && 'auto' || 'auto armv7l' }}
+          CIBW_ARCHS_MACOS: ${{ runner.arch == 'X64' && 'auto' || 'auto universal2' }}
+          CIBW_ARCHS_WINDOWS: "auto ARM64"
           CIBW_TEST_SKIP: "*-win_arm64"
           CIBW_BUILD_FRONTEND: "build"
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           path: ./wheelhouse/*.whl
+          name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
 
   upload_pypi:
     needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
-          # unpacks default artifact into dist/
-          # if `name: artifact` is omitted, the action will create extra parent dir
-          name: artifact
+          pattern: cibw-*
           path: dist
+          merge-multiple: true
 
       - uses: pypa/gh-action-pypi-publish@v1.5.0
-        # PRODUCTION PYPI: tags not containing dev.
-        # Note that the tags are already validated to control the running of
-        # this workflow!
-        if: "!contains(github.ref, 'dev')"
+        # Deploy releases to pypi.
+        if: github.event_name == 'release' && github.event.action == 'released'
         with:
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
 
       - uses: pypa/gh-action-pypi-publish@v1.5.0
-        # Deploy tags containing 'dev' to test pypi.
-        # Note that the tags are already validated to control the running of
-        # this workflow!
-        if: contains(github.ref, 'dev')
+        # Deploy pre-releases to test pypi.
+        if: github.event_name == 'release' && github.event.action == 'prereleased'
         with:
           user: __token__
           password: ${{ secrets.TEST_PYPI_API_TOKEN }}

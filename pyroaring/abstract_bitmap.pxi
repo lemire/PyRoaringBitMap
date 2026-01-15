@@ -12,18 +12,40 @@ try:
 except NameError: # python 3
     pass
 
-cdef croaring.roaring_bitmap_t *deserialize_ptr(char *buff):
+
+cdef croaring.roaring_bitmap_t *deserialize_ptr(const unsigned char[:] buff):
     cdef croaring.roaring_bitmap_t *ptr
-    ptr = croaring.roaring_bitmap_portable_deserialize(buff)
+    cdef const char *reason_failure = NULL
+
+    cdef char* buffer_ptr = <char*>&buff[0]
+
+    buff_size = len(buff)
+    ptr = croaring.roaring_bitmap_portable_deserialize_safe(buffer_ptr, buff_size)
+
+    if ptr == NULL:
+      raise ValueError("Could not deserialize bitmap")
+    # Validate the bitmap
+    if not croaring.roaring_bitmap_internal_validate(ptr, &reason_failure):
+        # If validation fails, free the bitmap and raise an exception
+        croaring.roaring_bitmap_free(ptr)
+        raise ValueError(f"Invalid bitmap after deserialization: {reason_failure.decode('utf-8')}")
     return ptr
 
-cdef croaring.roaring64_bitmap_t *deserialize64_ptr(bytes buff):
+cdef croaring.roaring64_bitmap_t *deserialize64_ptr(const unsigned char[:] buff):
     cdef croaring.roaring64_bitmap_t *ptr
+    cdef const char *reason_failure = NULL
+
+    cdef char* buffer_ptr = <char*>&buff[0]
+
     buff_size = len(buff)
-    bm_size = croaring.roaring64_bitmap_portable_deserialize_size(buff, buff_size)
-    if bm_size == 0:
-        raise ValueError("Invalid bitmap serialization")
-    ptr = croaring.roaring64_bitmap_portable_deserialize_safe(buff, bm_size)
+    ptr = croaring.roaring64_bitmap_portable_deserialize_safe(buffer_ptr, buff_size)
+    if ptr == NULL:
+      raise ValueError("Could not deserialize bitmap")
+    # Validate the bitmap
+    if not croaring.roaring64_bitmap_internal_validate(ptr, &reason_failure):
+        # If validation fails, free the bitmap and raise an exception
+        croaring.roaring64_bitmap_free(ptr)
+        raise ValueError(f"Invalid bitmap after deserialization: {reason_failure.decode('utf-8')}")
     return ptr
 
 def _string_rep(bm):
@@ -46,10 +68,7 @@ def _string_rep(bm):
 
     num_columns = table_max_width // column_width
 
-    num_rows = len(bm) / float(num_columns)
-    if not num_rows.is_integer():
-        num_rows += 1
-    num_rows = int(num_rows)
+    num_rows = (len(bm) + num_columns - 1) // num_columns
     rows = []
     row_idx = 0
     skipped = False
@@ -407,6 +426,7 @@ cdef class AbstractBitMap:
             return bitmaps[0] - bitmaps[1]
         else:
             result = BitMap(bitmaps[0])
+            result._h_val = 0
             for bm in bitmaps[1:]:
                 result -= bm
             return bitmaps[0].__class__(result)
@@ -460,6 +480,7 @@ cdef class AbstractBitMap:
             return bitmaps[0] & bitmaps[1]
         else:
             result = BitMap(bitmaps[0])
+            result._h_val = 0
             for bm in bitmaps[1:]:
                 result &= bm
             return bitmaps[0].__class__(result)
@@ -744,7 +765,7 @@ cdef class AbstractBitMap:
 
 
     @classmethod
-    def deserialize(cls, char *buff):
+    def deserialize(cls, const unsigned char[:] buff):
         """
         Generate a bitmap from the given serialization. See AbstractBitMap.serialize for the reverse operation.
 
@@ -1205,7 +1226,7 @@ cdef class AbstractBitMap64:
 
 
     @classmethod
-    def deserialize(cls, bytes buff):
+    def deserialize(cls, const unsigned char[:] buff):
         """
         Generate a bitmap from the given serialization. See AbstractBitMap64.serialize for the reverse operation.
 
@@ -1318,6 +1339,7 @@ cdef class AbstractBitMap64:
             return bitmaps[0] - bitmaps[1]
         else:
             result = BitMap64(bitmaps[0])
+            result._h_val = 0
             for bm in bitmaps[1:]:
                 result -= bm
             return bitmaps[0].__class__(result)
@@ -1368,6 +1390,7 @@ cdef class AbstractBitMap64:
             return bitmaps[0] & bitmaps[1]
         else:
             result = BitMap64(bitmaps[0])
+            result._h_val = 0
             for bm in bitmaps[1:]:
                 result &= bm
             return bitmaps[0].__class__(result)
